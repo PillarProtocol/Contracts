@@ -1,0 +1,663 @@
+scilla_version 0
+
+import IntUtils
+
+library VaultProxy
+  let zero = Uint32 0
+  let zero_uint128 = Uint128 0
+  let zero_bnum = BNum 0
+  let zero_address = 0x0000000000000000000000000000000000000000
+  let one = Uint32 1
+  let two = Uint32 2
+  
+  type VerifierParams =
+    | VerifierParams of Uint32 String Uint32 Uint32 Uint32 Uint32 Uint32 Uint32
+    
+    
+  type Error =
+    | CodeNotOwner
+    | CannotDecodeBNum
+    | OraclePriceToOld
+    | CodeIsSender
+    | UnableToDecodePrice
+    | UnableToDecodePriceLengthBytes
+    | UnableToDecodePriceBytes
+    | UnableToDecimalLengthBytes
+    | UnableToDecimalBytes
+    | InvalidSignature
+    | CannotBeZeroAddress
+    | AddressIsAlreadyUsedRegistered
+    | CollateralNameAlreadyUsed
+    | BlockNumberInvalidOrCannotDecode
+    | PriceStampTooOld
+    | CollateralNotRegistered
+    | CannotBeZero
+    | CollateralAndMessageShouldMatch
+  
+  let make_error =
+    fun (result : Error) =>
+      let result_code = 
+        match result with
+          | CodeNotOwner              => Int32 -301
+          | CannotDecodeBNum          => Int32 -302
+          | OraclePriceToOld          => Int32 -303
+          | CodeIsSender              => Int32 -304
+          | UnableToDecodePrice       => Int32 -305
+          | UnableToDecodePriceLengthBytes => Int32 -306
+          | UnableToDecodePriceBytes  => Int32 -307
+          | UnableToDecimalLengthBytes => Int32 -308
+          | UnableToDecimalBytes      => Int32 -309
+          | InvalidSignature          => Int32 -310
+          | CannotBeZeroAddress => Int32 -311
+          | AddressIsAlreadyUsedRegistered => Int32 -312
+          | CollateralNameAlreadyUsed => Int32 -313
+          | BlockNumberInvalidOrCannotDecode => Int32 -314
+          | PriceStampTooOld          => Int32 -315
+          | CollateralNotRegistered   => Int32 -316
+          | CannotBeZero              => Int32 -317
+          | CollateralAndMessageShouldMatch => Int32 -318
+        end
+      in
+      { _exception : "Error"; code : result_code }
+  
+  let extractUint32FromMessage =
+    fun (msg: String) =>
+    fun (index: Uint32) =>
+    fun (length: Uint32) =>
+      let len_of_col_str = builtin substr msg index length in
+      let some_col_length = builtin to_uint32 len_of_col_str in
+      match some_col_length with
+        | Some col_length =>
+          col_length
+        | None =>
+          zero
+      end
+  
+  let decode_bnum = 
+    fun (some_bnum: Option BNum) =>
+      match some_bnum with 
+        | Some bnum => bnum
+        | None => zero_bnum
+      end
+  
+  let decode_uint128 = 
+    fun (some_uint128: Option Uint128) =>
+      match some_uint128 with 
+        | Some uint128 => uint128
+        | None => zero_uint128
+      end
+  
+  let decode_uint32 = 
+    fun (some_uint32: Option Uint32) =>
+      match some_uint32 with 
+        | Some uint32 => uint32
+        | None => zero
+      end
+      
+  let decode_address = 
+    fun (some_address: Option ByStr20) =>
+      match some_address with 
+        | Some address => address
+        | None => zero_address
+      end
+
+  let extractStringFromMessage = 
+    fun (msg: String) =>
+    fun (index: Uint32) =>
+    fun (length: Uint32) =>
+      builtin substr msg index length 
+      
+  let bnum_to_uint128 = 
+    fun(block: BNum) =>
+      let temp_diff = builtin bsub block zero_bnum in
+      builtin to_uint128 temp_diff
+      
+  let bnum_to_uint32 = 
+    fun(block: BNum) =>
+      let temp_diff = builtin bsub block zero_bnum in
+      builtin to_uint32 temp_diff
+      
+  let extractParams =
+    fun(msg: String) =>
+      let col_length = extractUint32FromMessage msg zero one in
+      let col_name = extractStringFromMessage msg one col_length in
+      
+      let price_length_index = builtin add one col_length in
+      let price_length = extractUint32FromMessage msg price_length_index one in
+      
+      let price_index = builtin add price_length_index one in
+      let price = extractUint32FromMessage msg price_index price_length in
+      
+      let decimal_length_index = builtin add price_index price_length in
+      let decimal_length = extractUint32FromMessage msg decimal_length_index one in
+      
+      let decimal_index = builtin add decimal_length_index one in
+      let decimal = extractUint32FromMessage msg decimal_index decimal_length in
+      
+      let block_length_index = builtin add decimal_index decimal_length in
+      let block_length = extractUint32FromMessage msg block_length_index one in
+      
+      let block_index = builtin add block_length_index one in
+      let block = extractUint32FromMessage msg block_index block_length in 
+      VerifierParams col_length col_name price_length price decimal_length decimal block_length block
+  
+  let one_msg = 
+    fun (msg : Message) => 
+    let nil_msg = Nil {Message} in
+    Cons {Message} msg nil_msg
+      
+contract VaultProxy
+(
+  init_owner: ByStr20,
+  init_verifier: ByStr33,
+  version: Uint32
+)
+
+field owner : ByStr20 = init_owner
+field verifier : ByStr33 = init_verifier
+field pending_owner : Option ByStr20 = None {ByStr20}
+
+field priceDecimals: Map String Uint32 = Emp String Uint32
+field tokenPrice: Map String Uint32 = Emp String Uint32
+field tokenUpdatedAt: Map String Uint32 = Emp String Uint32
+
+field tokenNameToCollateralContract : Map String ByStr20 = Emp String ByStr20
+field collateralContractToTokenName : Map ByStr20 String = Emp ByStr20 String
+
+field price_lag : Uint32 = Uint32 10
+
+field proxy_version : Uint32 = version
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure IsOwner(address: ByStr20)
+  temp <- owner;
+  is_owner = builtin eq temp address;
+  match is_owner with
+  | True =>
+  | False =>
+    err = CodeNotOwner;
+    ThrowError err
+  end
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure CheckLength(length: Uint32, err: Error)
+  is_zero = builtin eq length zero;
+  match is_zero with 
+    | True =>
+      ThrowError err
+    | False =>
+  end
+end
+
+procedure CheckAddress(address: ByStr20)
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CannotBeZeroAddress;
+      ThrowError err
+    | False =>
+  end
+end
+
+procedure AddressShouldBeZero(address: ByStr20)
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+    | False =>
+      err = AddressIsAlreadyUsedRegistered;
+      ThrowError err
+  end
+end
+
+transition RegisterCollateral(col: String, contractAddress: ByStr20)
+  IsOwner _sender;
+  CheckAddress contractAddress;
+  
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+  AddressShouldBeZero address; 
+  
+  some_col_name <- collateralContractToTokenName[contractAddress];
+  match some_col_name with
+    | Some col_name =>
+      err = CollateralNameAlreadyUsed;
+      ThrowError err
+    | None =>
+      tokenNameToCollateralContract[col] := contractAddress;
+      collateralContractToTokenName[contractAddress] := col;
+      e = {_eventname: "RegisterCollateral"; col: col; contractAddress: contractAddress};
+      event e
+  end
+end
+
+transition ChangeVerifier(new_verifier: ByStr33)
+  IsOwner _sender;
+  verifier := new_verifier;
+  e = {_eventname: "ChangedVerifier"; new_verifier: new_verifier};
+  event e
+end
+
+transition RequestOwnershipTransfer (new_owner : ByStr20)
+  IsOwner _sender;
+  IsNotSender new_owner;
+  po = Some {ByStr20} new_owner;
+  pending_owner := po
+end
+
+transition ConfirmOwnershipTransfer ()
+  optional_po <- pending_owner;
+  match optional_po with
+  | Some pend_owner =>
+      caller_is_new_owner = builtin eq _sender pend_owner;
+      match caller_is_new_owner with
+      | True =>
+          owner := pend_owner;
+          none = None {ByStr20};
+          pending_owner := none;
+          e = {_eventname : "TransferOwnership"; newOwner : pend_owner};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+procedure UpdateMapping(col: String, price: Uint32, decimals: Uint32, block: Uint32)
+  priceDecimals[col] := decimals;
+  tokenPrice[col] := price;
+  tokenUpdatedAt[col] := block;
+  e = {_eventname: "PriceUpdated"; collateral: col; price: price; decimals: decimals};
+  event e
+end
+
+procedure verifySignature(msg: String, sign: ByStr64)
+  data_to_verify = builtin sha256hash msg;
+  pubk <- verifier;
+  e = {_eventname: "RawDataToVerifySignature"; data_to_verify: data_to_verify; sign: sign; pubk: pubk};
+  event e;
+  data = builtin to_bystr data_to_verify;
+  is_valid = builtin schnorr_verify pubk data sign;
+  match is_valid with
+    | True =>
+      e2 = {_eventname: "SignatureValid"};
+      event e2
+    | False =>
+      err = InvalidSignature;
+      ThrowError err
+  end
+end
+
+procedure checkErrors(col_length: Uint32, price_length: Uint32, price: Uint32, decimal_length: Uint32, decimal: Uint32, block_length: Uint32, block: Uint32)
+  err = UnableToDecodePrice;
+  CheckLength col_length err;
+  
+  err = UnableToDecodePriceLengthBytes;
+  CheckLength price_length err;
+  
+  err = UnableToDecodePriceBytes;
+  CheckLength price err;
+  
+  err = UnableToDecimalLengthBytes;
+  CheckLength decimal_length err;
+  
+  err = UnableToDecimalBytes;
+  CheckLength decimal err;
+  
+  err = UnableToDecimalLengthBytes;
+  CheckLength block_length err;
+
+  err = BlockNumberInvalidOrCannotDecode;
+  CheckLength block err
+end
+
+procedure UpdatePriceInternal(msg: String, sign: ByStr64)
+  verifySignature msg sign;
+  params = extractParams msg;
+  
+  match params with 
+    | VerifierParams col_length col_name price_length price decimal_length decimal block_length block =>
+      
+      checkErrors col_length price_length price decimal_length decimal block_length block; 
+      cb <- & BLOCKNUMBER;
+      
+      lag <- price_lag;
+      
+      should_throw_errow = 
+        let some_current_block = bnum_to_uint32 cb in
+        let current_block = decode_uint32 some_current_block in
+        let minimum_block_for_transaction = builtin sub current_block lag in
+        builtin lt block minimum_block_for_transaction;
+      
+      match should_throw_errow with
+        | True =>
+          err = PriceStampTooOld;
+          ThrowError err
+        | False =>
+          some_lub <- tokenUpdatedAt[col_name];
+          is_update_required = 
+          let lub = decode_uint32 some_lub in
+          let block_plus_one = builtin add block one in
+          builtin lt lub block_plus_one;
+            
+          match is_update_required with
+            | True =>
+              UpdateMapping col_name price decimal block
+            | False =>
+          end
+      end
+  end
+end
+
+transition UpdatePrice(msg: String, sign: ByStr64)
+  UpdatePriceInternal msg sign
+end
+
+procedure IsCollateralSame(col1: String, col2: String)
+  is_zero = builtin eq col1 col2;
+  match is_zero with
+    | True =>
+    | False =>
+      err = CollateralAndMessageShouldMatch;
+      ThrowError err
+  end
+end
+
+transition MintFromOracle(msg: String, sign: ByStr64, col: String, vaultFactory: ByStr20, vaultId: Uint32, recipient: ByStr20, amount: Uint128)
+  UpdatePriceInternal msg sign;
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+  
+  params = extractParams msg;
+  
+  match params with 
+    | VerifierParams col_length col_name price_length price decimal_length decimal block_length block =>
+      IsCollateralSame col col_name;
+      is_zero = builtin eq address zero_address;
+      match is_zero with
+        | True =>
+          err = CollateralNotRegistered;
+          ThrowError err
+        | False =>
+          some_p <- tokenPrice[col];
+          some_d <- priceDecimals[col];
+          
+          p = decode_uint32 some_p;
+          d = decode_uint32 some_d;
+          err = CannotBeZero;
+          CheckLength p err;
+          CheckLength d err;
+          
+          msg_to_vault_factory = {_tag : "MintPillar"; _recipient : vaultFactory; _amount : zero_uint128; 
+                                  vaultId : vaultId; initiator : _sender; receiver: recipient;
+                                  amount: amount; price: p; decimals: d};
+          msgs = one_msg msg_to_vault_factory;
+          send msgs
+      end
+  end
+end
+
+transition MintDirectly(col: String, vaultFactory: ByStr20, vaultId: Uint32, recipient: ByStr20, amount: Uint128)
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_lub <- tokenUpdatedAt[col];
+      lub = decode_uint32 some_lub;
+
+      cb <- & BLOCKNUMBER;
+      lag <- price_lag;
+      should_throw_error = 
+        let some_current_block = bnum_to_uint32 cb in
+        let current_block = decode_uint32 some_current_block in
+        let minimum_block_for_transaction = builtin sub current_block lag in
+        builtin lt lub minimum_block_for_transaction;
+
+        match should_throw_error with 
+          | True =>
+            err = OraclePriceToOld;
+            ThrowError err
+          | False =>
+            some_p <- tokenPrice[col];
+            some_d <- priceDecimals[col];
+            
+            p = decode_uint32 some_p;
+            d = decode_uint32 some_d;
+            err = CannotBeZero;
+            CheckLength p err;
+            CheckLength d err;
+            
+            msg_to_vault_factory = {_tag : "MintPillar"; _recipient : vaultFactory; _amount : zero_uint128; 
+                                    vaultId : vaultId; initiator : _sender; receiver: recipient;
+                                    amount: amount; price: p; decimals: d};
+            msgs = one_msg msg_to_vault_factory;
+            send msgs
+        end
+  end
+end
+
+transition RepayFromOracle(msg: String, sign: ByStr64, col: String, vaultFactory: ByStr20, vaultId: Uint32, amount: Uint128)
+  UpdatePriceInternal msg sign;
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+  
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_p <- tokenPrice[col];
+      some_d <- priceDecimals[col];
+      
+      p = decode_uint32 some_p;
+      d = decode_uint32 some_d;
+      err = CannotBeZero;
+      CheckLength p err;
+      CheckLength d err;
+      
+      msg_to_vault_factory = {_tag : "RepayPillar"; _recipient : vaultFactory; _amount : zero_uint128; 
+                              vaultId : vaultId; initiator : _sender; amount: amount;
+                              price: p; decimals: d};
+      msgs = one_msg msg_to_vault_factory;
+      send msgs
+  end
+end
+
+transition RepayDirectly(col: String, vaultFactory: ByStr20, vaultId: Uint32, amount: Uint128)
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_lub <- tokenUpdatedAt[col];
+      lub = decode_uint32 some_lub;
+
+      cb <- & BLOCKNUMBER;
+      lag <- price_lag;
+      should_throw_error = 
+        let some_current_block = bnum_to_uint32 cb in
+        let current_block = decode_uint32 some_current_block in
+        let minimum_block_for_transaction = builtin sub current_block lag in
+        builtin lt lub minimum_block_for_transaction;
+
+        match should_throw_error with 
+          | True =>
+            err = OraclePriceToOld;
+            ThrowError err
+          | False =>
+            some_p <- tokenPrice[col];
+            some_d <- priceDecimals[col];
+            
+            p = decode_uint32 some_p;
+            d = decode_uint32 some_d;
+            err = CannotBeZero;
+            CheckLength p err;
+            CheckLength d err;
+            
+            msg_to_vault_factory = {_tag : "RepayPillar"; _recipient : vaultFactory; _amount : zero_uint128; 
+                                    vaultId : vaultId; initiator : _sender; amount: amount;
+                                    price: p; decimals: d};
+            msgs = one_msg msg_to_vault_factory;
+            send msgs
+        end
+  end
+end
+
+transition LiquidateFromOracle(msg: String, sign: ByStr64, col: String, vaultFactory: ByStr20, vaultId: Uint32)
+  UpdatePriceInternal msg sign;
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+  
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_p <- tokenPrice[col];
+      some_d <- priceDecimals[col];
+      
+      p = decode_uint32 some_p;
+      d = decode_uint32 some_d;
+      err = CannotBeZero;
+      CheckLength p err;
+      CheckLength d err;
+      
+      msg_to_vault_factory = {_tag : "LiquidateVault"; _recipient : vaultFactory; _amount : zero_uint128; 
+                              vaultId : vaultId; initiator : _sender;
+                              price: p; decimals: d};
+      msgs = one_msg msg_to_vault_factory;
+      send msgs
+  end
+end
+
+transition LiquidateDirectly(col: String, vaultFactory: ByStr20, vaultId: Uint32, amount: Uint128)
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_lub <- tokenUpdatedAt[col];
+      lub = decode_uint32 some_lub;
+
+      cb <- & BLOCKNUMBER;
+      lag <- price_lag;
+      should_throw_error = 
+        let some_current_block = bnum_to_uint32 cb in
+        let current_block = decode_uint32 some_current_block in
+        let minimum_block_for_transaction = builtin sub current_block lag in
+        builtin lt lub minimum_block_for_transaction;
+
+        match should_throw_error with 
+          | True =>
+            err = OraclePriceToOld;
+            ThrowError err
+          | False =>
+            some_p <- tokenPrice[col];
+            some_d <- priceDecimals[col];
+            
+            p = decode_uint32 some_p;
+            d = decode_uint32 some_d;
+            err = CannotBeZero;
+            CheckLength p err;
+            CheckLength d err;
+            
+            msg_to_vault_factory = {_tag : "LiquidateVault"; _recipient : vaultFactory; _amount : zero_uint128; 
+                                    vaultId : vaultId; initiator : _sender; amount: amount;
+                                    price: p; decimals: d};
+            msgs = one_msg msg_to_vault_factory;
+            send msgs
+        end
+  end
+end
+
+transition ReleaseCollateral(msg: String, sign: ByStr64, col: String, vaultFactory: ByStr20, vaultId: Uint32, amount: Uint128, receiver: ByStr20)
+  UpdatePriceInternal msg sign;
+  some_col_contract <- tokenNameToCollateralContract[col];
+  address = decode_address some_col_contract;
+
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | True =>
+      err = CollateralNotRegistered;
+      ThrowError err
+    | False =>
+      some_p <- tokenPrice[col];
+      some_d <- priceDecimals[col];
+      
+      p = decode_uint32 some_p;
+      d = decode_uint32 some_d;
+      err = CannotBeZero;
+      CheckLength p err;
+      CheckLength d err;
+      
+      msg_to_vault_factory = {_tag : "ReleaseCollateral"; _recipient : vaultFactory; _amount : zero_uint128; 
+                              vaultId : vaultId; initiator : _sender; amount: amount;
+                              price: p; decimals: d; receiver: receiver};
+      msgs = one_msg msg_to_vault_factory;
+      send msgs
+  end
+end
+
+transition TransferZil(vaultFactory: ByStr20, receiver: ByStr20, amount: Uint128)
+  IsOwner _sender;
+  
+  msg_to_vault_factory = {_tag : "transferOutZIL"; _recipient : vaultFactory; _amount : zero_uint128; 
+                              address: receiver; amount: amount };
+  msgs = one_msg msg_to_vault_factory;
+  send msgs
+end
+
+transition RemoveCollateral(vaultFactory: ByStr20, receiver: ByStr20, amount: Uint128)
+  IsOwner _sender;
+  
+  msg_to_vault_factory = {_tag : "transferOutCollateral"; _recipient : vaultFactory; _amount : zero_uint128; 
+                            address: receiver; amount: amount };
+  msgs = one_msg msg_to_vault_factory;
+  send msgs
+end
+
+transition GiveMigrationAccess(migrationContract: ByStr20, vaultFactory: ByStr20)
+  IsOwner _sender;
+  
+  msg_to_vault_factory = {_tag : "UpdateMigration"; _recipient : vaultFactory; _amount : zero_uint128; 
+                            migrationContract: migrationContract };
+  
+  msgs = one_msg msg_to_vault_factory;
+  send msgs
+end
+
+
+
+
+
+
+
+

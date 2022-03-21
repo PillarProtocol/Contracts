@@ -1,0 +1,540 @@
+scilla_version 0
+
+import IntUtils BoolUtils
+
+library Staking
+    let eighteen_uint32 = Uint32 18
+    
+    let zero_uint128 = Uint128 0
+    let zero_address = 0x0000000000000000000000000000000000000000
+    let zero_bnum = BNum 0
+
+    let one_uint128 = Uint128 1
+    let max_uint128 = Uint128 340282366920938463463374607431768211455
+    let ten_thousand = Uint128 10000
+
+    let zero_uint256 = Uint256 0
+    let one_uint256 = Uint256 1
+    let ten_uint256 = Uint256 10
+    let ten_thousand_uint256 = Uint256 10000
+    let false = False
+
+    let decode_value = 
+        fun (some_value: Option Uint128) =>
+            match some_value with 
+                | Some value => value
+                | None => zero_uint128
+             end
+
+    let decode_value_uint256 = 
+        fun (some_value: Option Uint256) =>
+            match some_value with 
+                | Some value => value
+                | None => zero_uint256
+            end
+            
+    let decode_bnum = 
+        fun (some_bnum: Option BNum) =>
+            match some_bnum with 
+                | Some bnum => bnum
+                | None => zero_bnum
+            end
+
+    type Error =
+    | CallerNotAdmin
+    | DelegationContractNotSet
+    | CodeIsSender
+    | CannotBeZero
+    | DoesNotHaveWithdrawableShares
+    | CannotReleaseTokens
+    | OnlyRequestInitiator
+    | CannotBeLiquidatorOfLastResort
+
+    let make_error =
+        fun (result : Error) =>
+            let result_code = 
+                match result with
+                | CallerNotAdmin                 => Int32 -801
+                | DelegationContractNotSet       => Int32 -802
+                | CodeIsSender                   => Int32 -803
+                | CannotBeZero                   => Int32 -804
+                | DoesNotHaveWithdrawableShares  => Int32 -805
+                | CannotReleaseTokens            => Int32 -806
+                | OnlyRequestInitiator           => Int32 -807
+                | CannotBeLiquidatorOfLastResort => Int32 -808
+                end
+            in
+            { _exception : "Error"; code : result_code }
+
+    (* total gzil locked, total shares, new shares generated after deposit *)
+    type DepositResponse =
+    | DepositResponse of Uint128 Uint128 Uint128
+
+    (* total gzil locked, total shares, equivalent tokens *)
+    type WithdrawResponse =
+    | WithdrawResponse of Uint128 Uint128 Uint128
+
+    (* address of user, shares, block number at which request is generated *)
+    type UnlockRequestDetails = 
+    | UnlockRequestDetails of ByStr20 Uint128 BNum
+
+    let one_msg = 
+        fun (msg : Message) => 
+            let nil_msg = Nil {Message} in
+            Cons {Message} msg nil_msg
+            
+    let decode_uint128 = 
+        fun (some_value: Option Uint128) =>
+            match some_value with 
+                | Some value => value
+                | None => zero_uint128
+            end
+
+    let get_unlock_request = 
+        fun (some_unlockRequest: Option UnlockRequestDetails) => 
+            match some_unlockRequest with
+                | Some ur => ur
+                | None => UnlockRequestDetails zero_address zero_uint128 zero_bnum
+            end
+ 
+    let get_bool = 
+        fun (some_bool: Option Bool) =>
+            match some_bool with
+            | Some bool => bool
+            | None => false
+            end
+
+    let mul_mul_div = 
+        fun (a: Uint128) =>
+        fun (b: Uint128) =>
+        fun (c: Uint128) =>
+            let temp = builtin mul a b in
+            builtin div temp c
+
+    let calculateNewAmountAfterDeposit:  Uint128 -> Uint128 -> Uint128 -> DepositResponse = 
+        fun (totalGzil: Uint128) =>
+        fun (totalShares: Uint128) =>
+        fun (amount: Uint128) => 
+            let is_total_share_zero = builtin eq totalShares zero_uint128 in
+                match is_total_share_zero with 
+                    | True =>
+                        DepositResponse amount amount amount
+                    | False =>
+                        let newShares = mul_mul_div totalShares amount totalGzil in
+                        let newTotalShares = builtin add newShares totalShares in
+                        let newTotalGZil = builtin add totalGzil amount in
+                        DepositResponse newTotalGZil newTotalShares newShares
+                end        
+                
+    let calculateNewAmountAfterWithdraw: Uint128 -> Uint128 -> Uint128 -> WithdrawResponse =
+        fun (totalGzil: Uint128) =>
+        fun (totalShares: Uint128) =>
+        fun (shares: Uint128) =>
+            let is_total_share_zero = builtin eq totalShares zero_uint128 in
+                match is_total_share_zero with 
+                    | True =>
+                        WithdrawResponse totalGzil zero_uint128 zero_uint128
+                    | False => 
+                        let amountToRelease = mul_mul_div shares totalGzil totalShares in
+                        let newTotalShares = builtin sub totalShares shares in
+                        let newTotalGzil = builtin sub totalGzil amountToRelease in
+                        WithdrawResponse newTotalGzil newTotalShares amountToRelease
+                end
+
+
+    let option_sub: Option Uint128 -> Option Uint128 -> Uint128 =
+        fun (some_userShares: Option Uint128) =>
+        fun (some_userSharesInRequest: Option Uint128) => 
+                let userShares = decode_uint128 some_userShares in
+                let is_zero = builtin eq userShares zero_uint128 in
+                    match is_zero with
+                        | True =>
+                           zero_uint128
+                        | False =>
+                            let userSharesInRequest = decode_uint128 some_userSharesInRequest in
+                            builtin sub userShares userSharesInRequest
+                    end
+    
+    let collateralizationRatio =
+        fun(collateral: Uint128) =>
+        fun(total_pillar: Uint128) =>
+        fun(collateralPrice: Uint32) =>
+        fun(collateralPriceDecimals: Uint32) =>
+        fun(pillarTokenDecimals: Uint32) =>
+        let is_zero = builtin lt collateral one_uint128 in
+            match is_zero with
+                | True =>
+                    zero_uint128
+                | False =>
+                    let is_total_pillar_zero = builtin lt total_pillar one_uint128 in
+                    match  is_total_pillar_zero with
+                        | True => 
+                            max_uint128
+                        | False =>         
+                            let exponentiator = ten_thousand_uint256 in
+                            let some_big_collateral = builtin to_uint256 collateral in
+                            let some_big_total_pillar = builtin to_uint256 total_pillar in
+                            let big_collateral = decode_value_uint256 some_big_collateral in
+                            let some_big_total_pillar = builtin to_uint256 total_pillar in
+                            let big_total_pillar = decode_value_uint256 some_big_total_pillar in
+                            let price_exponent = builtin pow ten_uint256 collateralPriceDecimals in
+                            let eighteen_exponent = builtin pow ten_uint256 eighteen_uint32 in
+                            let some_collateral_price = builtin to_uint256 collateralPrice in
+                            let collateral_price = decode_value_uint256 some_collateral_price in
+                            let temp1 = builtin mul big_collateral collateral_price in
+                            let temp2 = builtin mul temp1 price_exponent in
+                            let temp3 = builtin mul temp2 exponentiator in
+                            let temp4 = builtin div temp3 big_total_pillar in
+                            let temp5 = builtin div temp4 eighteen_exponent in
+                            let some_result = builtin to_uint128 temp5 in
+                            decode_value some_result
+                    end
+            end
+    let calculateMarginalInterest = 
+        fun(pillar: Uint128) =>
+        fun(interestPer10000Tokens: Uint128) =>
+        fun(lastUpdatedBlock: BNum) =>
+        fun(currentBlock: BNum) =>
+        fun(bpy: Uint128) =>
+            let blockDiff = builtin bsub currentBlock lastUpdatedBlock in
+            let some_diff = builtin to_uint128 blockDiff in
+            let diff = decode_value some_diff in
+            let temp1 = builtin mul pillar diff in
+            let temp2 = builtin mul temp1 interestPer10000Tokens in
+            let temp3 = builtin div temp2 bpy in
+            builtin div temp3 ten_thousand
+
+contract GzilStaking 
+(
+    init_admin: ByStr20,
+    gzil_token_contract: ByStr20
+)
+
+field totalGzilLocked: Uint128 = zero_uint128
+field totalShares: Uint128 = zero_uint128
+
+field userShares: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field userSharesPendingToBeWithdrawn: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+field delegationContract: ByStr20 = zero_address
+
+field unlockWaitBlocks: Uint128 = Uint128 1
+field unlockRequests: Map Uint128 UnlockRequestDetails = Emp Uint128 UnlockRequestDetails
+field unlockRequestCount: Uint128 = zero_uint128
+
+field admin: ByStr20 = init_admin
+field pending_admin : Option ByStr20 = None {ByStr20}
+
+field vaultProxy: ByStr20 = zero_address
+field vaultFactory: ByStr20 = zero_address
+field rewardContract: ByStr20 = zero_address
+
+(* 5000 means 50% *)
+field thresholdLiquidation: Uint128 = Uint128 5000 
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure IsDelegationNotContractSet()
+    dc <- delegationContract;
+    is_dc_zero = builtin eq dc zero_address;
+    match is_dc_zero with
+        | False =>
+        | True =>
+            err = DelegationContractNotSet;
+            ThrowError err
+    end
+end
+
+procedure IsAdmin(address: ByStr20)
+  adm <- admin;
+  is_adm = builtin eq address adm;
+  match is_adm with
+    | True =>
+    | False => 
+      err = CallerNotAdmin;
+      ThrowError err
+  end
+end
+
+procedure OnlyInitiator(address: ByStr20)
+  is_owner = builtin eq address _sender;
+  match is_owner with
+    | True =>
+    | False => 
+      err = OnlyRequestInitiator;
+      ThrowError err
+  end
+end
+
+procedure IsNotZero(value: Uint128)
+  is_zero = builtin eq value zero_uint128;
+  match is_zero with
+    | False =>
+    | True =>
+      err = CannotBeZero;
+      ThrowError err
+  end
+end
+
+procedure checkRequestWithdrawlBlock(blockNumber: BNum)
+    gap <- unlockWaitBlocks;
+    releaseBlock = builtin badd blockNumber gap;
+    currentBlock <- & BLOCKNUMBER;
+    is_releaseable = builtin blt releaseBlock currentBlock;
+    match is_releaseable with
+        | True =>
+        | False =>
+            err = CannotReleaseTokens;
+            ThrowError err
+    end
+end
+
+transition ChangeUnlockWaitsBlocks(new_wait_blocks: Uint128)
+    IsAdmin _sender;
+    unlockWaitBlocks := new_wait_blocks;
+    e = {_eventname : "ChangeUnlockWaitsBlocks"; new_wait_blocks : new_wait_blocks};
+    event e
+end
+
+transition changeDelegationContract(dc: ByStr20)
+    IsAdmin _sender;
+    delegationContract := dc;
+    e = {_eventname : "ChangeDelegationContract"; new_delegation : dc};
+    event e
+end
+
+transition RequestAdminTransfer (new_admin : ByStr20)
+  IsAdmin _sender;
+  IsNotSender new_admin;
+  pa = Some {ByStr20} new_admin;
+  pending_admin := pa
+end
+
+transition ConfirmAdminTransfer ()
+  optional_pa <- pending_admin;
+  match optional_pa with
+  | Some pend_admin =>
+      caller_is_new_admin = builtin eq _sender pend_admin;
+      match caller_is_new_admin with
+      | True =>
+          admin := pend_admin;
+          none = None {ByStr20};
+          pending_admin := none;
+          e = {_eventname : "TransferOwnership"; newAdmin : pend_admin};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+transition ChangeRewardContract(newRewardContract: ByStr20)
+    IsAdmin _sender;
+    rewardContract := newRewardContract;
+    e = {_eventname : "ChangeRewardContract"; rewardContract : newRewardContract};
+    event e
+end
+
+procedure SafeTransferFrom(tokenContract: ByStr20, from: ByStr20, to: ByStr20, amount: Uint128)
+    msg_to_token_contract = {_tag: "TransferFrom"; _recipient: tokenContract; _amount: zero_uint128;
+                                    from: from; to: to; amount: amount
+                                };
+    msgs = one_msg msg_to_token_contract;
+    send msgs
+end
+
+procedure SafeTransfer(tokenContract: ByStr20,to: ByStr20, amount: Uint128)
+    msg_to_token_contract = {_tag: "Transfer"; _recipient: tokenContract; _amount: zero_uint128;
+                                to: to; amount: amount };
+    msgs = one_msg msg_to_token_contract;
+    send msgs
+end
+
+procedure SafeIncreaseAllowance(tokenContract: ByStr20,spender: ByStr20, amount: Uint128)
+    msg_to_token_contract = {_tag: "IncreaseAllowance"; _recipient: tokenContract; _amount: zero_uint128;
+                                spender: spender; amount: amount };
+    msgs = one_msg msg_to_token_contract;
+    send msgs
+end
+
+procedure SafeDecreaseAllowance(tokenContract: ByStr20,spender: ByStr20, amount: Uint128)
+    msg_to_token_contract = {_tag: "DecreaseAllowance"; _recipient: tokenContract; _amount: zero_uint128;
+                                spender: spender; amount: amount };
+    msgs = one_msg msg_to_token_contract;
+    send msgs
+end
+
+transition lockTokens(amount: Uint128)
+    SafeTransferFrom gzil_token_contract _sender _this_address amount;
+
+    oldTotalShares <- totalShares;
+    oldTotalGzilLocked <- totalGzilLocked;
+    some_oldUserShares <- userShares[_sender];
+    oldUserShares = decode_uint128 some_oldUserShares;
+    
+    dr = calculateNewAmountAfterDeposit oldTotalGzilLocked oldTotalShares amount;
+    match dr with
+        | DepositResponse newTotalGZil newTotalShares newShares =>
+          totalShares := newTotalShares;
+          totalGzilLocked := newTotalGZil;
+          newUserShares = builtin add oldUserShares newShares;
+          userShares[_sender] := newUserShares;
+          
+          dc <- delegationContract; 
+          msg_to_delegation_contract = {_tag: "NotifyDelegation"; _recipient: dc; _amount: zero_uint128;
+                                        address: _sender };
+          
+          msgs = one_msg msg_to_delegation_contract;
+          send msgs;
+          e = {_eventname: "LockedTokens"; totalShares: newTotalShares; totalGzilLocked: newTotalGZil;
+                userTotalShares: newUserShares; amount: amount; user: _sender; sharesObtained: newShares
+            };
+          event e
+    end
+end
+
+procedure CheckWithdrawAbleShares(address: ByStr20, shares: Uint128)
+    someUserShares <- userShares[address];
+    someUserSharesInRequest <- userSharesPendingToBeWithdrawn[address];
+    withdrawableShares = option_sub someUserShares someUserSharesInRequest;
+    
+
+    is_zero = builtin lt shares withdrawableShares;
+    match is_zero with 
+    | True => 
+    | False =>
+        err = DoesNotHaveWithdrawableShares;
+        ThrowError err
+    end
+end
+
+transition requestUnlock(shares: Uint128)
+    IsNotZero shares;
+    CheckWithdrawAbleShares _sender shares;
+    some_existingSharesInWithdraw <- userSharesPendingToBeWithdrawn[_sender];
+    sharesInWithdraw = decode_uint128 some_existingSharesInWithdraw;
+    newSharesInWithdraw = builtin add sharesInWithdraw shares;
+    userSharesPendingToBeWithdrawn[_sender] := newSharesInWithdraw;
+
+    blk <- & BLOCKNUMBER;
+    unlockRequest = UnlockRequestDetails _sender shares blk;
+    totalRequests <- unlockRequestCount;
+    newRequestId = builtin add totalRequests one_uint128;
+    unlockRequestCount := newRequestId;
+
+    unlockRequests[newRequestId] := unlockRequest;
+
+    e = {_eventname: "NewUnlockRequest"; shares: shares; user: _sender; requestId: newRequestId; block: blk};
+        event e
+end
+
+transition cancelUnlockRequest(requestId: Uint128)
+    some_UnlockRequest <- unlockRequests[requestId];
+    unlockRequest = get_unlock_request some_UnlockRequest;
+    match unlockRequest with
+        | UnlockRequestDetails address shares blockNumber =>
+            OnlyInitiator address;
+
+            some_oldUserLockedShares <- userSharesPendingToBeWithdrawn[address];
+            oldUserLockedShares = decode_uint128 some_oldUserLockedShares;
+            newLockedShares = builtin sub oldUserLockedShares shares;
+            userSharesPendingToBeWithdrawn[address] := newLockedShares;
+
+            delete unlockRequests[requestId];
+
+            e = {_eventname: "DeleteUnlockRequest"; requestId: requestId};
+            event e
+    end
+end
+
+
+transition withdraw(requestId: Uint128)
+    some_UnlockRequest <- unlockRequests[requestId];
+    unlockRequest = get_unlock_request some_UnlockRequest;
+    match unlockRequest with
+        | UnlockRequestDetails address shares blockNumber =>
+            IsNotZero shares;
+            oldTotalShares <- totalShares;
+            oldTotalGzilLocked <- totalGzilLocked;
+            checkRequestWithdrawlBlock blockNumber;
+            wr = calculateNewAmountAfterWithdraw oldTotalGzilLocked oldTotalShares shares;
+            match wr with
+                | WithdrawResponse newTotalGZil newTotalShares amount =>
+                  totalShares := newTotalShares;
+                  totalGzilLocked := newTotalGZil;
+
+                  some_oldUserShares <- userShares[_sender];
+                  oldUserShares = decode_uint128 some_oldUserShares;
+                  newUserShares = builtin sub oldUserShares shares;
+                  userShares[_sender] := newUserShares;
+                  
+                  some_oldUserLockedShares <- userSharesPendingToBeWithdrawn[address];
+                  oldUserLockedShares = decode_uint128 some_oldUserLockedShares;
+                  newLockedShares = builtin sub oldUserLockedShares shares;
+                  userSharesPendingToBeWithdrawn[address] := newLockedShares;
+
+                  delete unlockRequests[requestId];
+
+                  SafeTransfer gzil_token_contract address amount;
+
+
+                  e = {_eventname: "WithdrawTokens"; totalShares: newTotalShares; totalGzilLocked: newTotalGZil;
+                            userTotalShares: newUserShares; shares: shares; user: _sender; amountReleased: amount
+                        };
+                    event e
+            end
+    end
+end
+
+transition TransferSuccessCallBack(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+    e = {_eventname: "TransferSuccessCallBack"; sender : sender; recipient: recipient; amount: amount};
+    event e
+end
+
+transition TransferFromSuccessCallBack(initiator: ByStr20, sender : ByStr20, recipient: ByStr20, amount: Uint128)
+    e = {_eventname: "TransferFromSuccessCallBack"; initiator: initiator; sender : sender; recipient: recipient; amount: amount};
+    event e
+end
+
+
+transition RecipientAcceptTransferFrom(initiator: ByStr20, sender : ByStr20, recipient: ByStr20, amount: Uint128)
+    e = {_eventname: "RecipientAcceptTransferFrom"; initiator: initiator; sender : sender; recipient: recipient; amount: amount};
+    event e
+end
+
+transition ChangeVaultProxy(newVaultProxy: ByStr20)
+  IsAdmin _sender;
+  vaultProxy := newVaultProxy;
+  e = {_eventname : "ChangeVaultProxy"; vaultProxy : newVaultProxy};
+  event e
+end
+
+transition ChangeVaultFactory(newVaultFactory: ByStr20)
+  IsAdmin _sender;
+  vaultFactory := newVaultFactory;
+  e = {_eventname : "ChangeVaultFactory"; vaultFactory : newVaultFactory};
+  event e
+end
+
+transition IncreaseAllowance(token: ByStr20, spender: ByStr20, amount: Uint128)
+    IsAdmin _sender; 
+    SafeIncreaseAllowance token spender amount
+end
+
+transition DecreaseAllowance(token: ByStr20, spender: ByStr20, amount: Uint128)
+    IsAdmin _sender; 
+    SafeDecreaseAllowance token spender amount
+end

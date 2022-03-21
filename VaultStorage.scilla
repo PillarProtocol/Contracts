@@ -1,0 +1,367 @@
+scilla_version 0
+
+import IntUtils
+
+library VaultStorage
+    let zero_uint32 = Uint32 0
+    let zero_uint128 = Uint128 0
+    let zero_bnum = BNum 0
+
+    let false = False
+
+    type Error =
+        | CallerNotAdmin
+        | CodeIsSender
+        | DisabledVaultFactory
+        | CallableOnlyByVaultFactory
+
+    let make_error =
+        fun (result : Error) =>
+        let result_code = 
+            match result with
+            | CallerNotAdmin            => Int32 -601
+            | CodeIsSender              => Int32 -602
+            | DisabledVaultFactory      => Int32 -603     
+            | CallableOnlyByVaultFactory => Int32 -604
+            end
+        in
+        { _exception : "Error"; code : result_code }
+    
+    let get_bool = 
+        fun (some_bool: Option Bool) =>
+          match some_bool with
+            | Some bool => bool
+            | None => false
+          end
+    
+    let decode_value = 
+          fun (some_value: Option Uint128) =>
+              match some_value with 
+                  | Some value => value
+                  | None => zero_uint128
+               end
+
+    let decode_bnum = 
+      fun (some_value: Option BNum) =>
+          match some_value with 
+              | Some value => value
+              | None => zero_bnum
+          end
+
+contract VaultStorage
+(
+    init_admin: ByStr20,
+    init_admin_params: ByStr20 with contract field active_vault_factories: Map ByStr20 Bool end
+)
+
+field admin: ByStr20 = init_admin
+field pending_admin : Option ByStr20 = None {ByStr20}
+
+field admin_params: ByStr20 with contract field active_vault_factories: Map ByStr20 Bool end = init_admin_params
+(* ID owner mapping *)
+field vaults: Map Uint32 ByStr20 = Emp Uint32 ByStr20
+field total_vaults: Uint32 = zero_uint32
+
+field total_pillar_minted: Uint128 = zero_uint128
+field total_pillar_repaid: Uint128 = zero_uint128
+field total_collateral: Uint128 = zero_uint128
+
+(* active params *)
+field collateral_amount: Map Uint32 Uint128 = Emp Uint32 Uint128
+field pillar_borrowed: Map Uint32 Uint128 = Emp Uint32 Uint128
+field interest_accumulated: Map Uint32 Uint128 = Emp Uint32 Uint128
+field last_updated_at: Map Uint32 BNum = Emp Uint32 BNum
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure IsAdmin(address: ByStr20)
+  adm <- admin;
+  is_adm = builtin eq address adm;
+  match is_adm with
+    | True =>
+    | False => 
+      err = CallerNotAdmin;
+      ThrowError err
+  end
+end
+
+transition RequestAdminTransfer (new_admin : ByStr20)
+  IsAdmin _sender;
+  IsNotSender new_admin;
+  pa = Some {ByStr20} new_admin;
+  pending_admin := pa
+end
+
+transition ConfirmAdminTransfer ()
+  optional_pa <- pending_admin;
+  match optional_pa with
+  | Some pend_admin =>
+      caller_is_new_admin = builtin eq _sender pend_admin;
+      match caller_is_new_admin with
+      | True =>
+          admin := pend_admin;
+          none = None {ByStr20};
+          pending_admin := none;
+          e = {_eventname : "TransferOwnership"; newAdmin : pend_admin};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+transition ChangeAdminParams(new_admin_params: ByStr20 with contract field active_vault_factories: Map ByStr20 Bool end)
+  IsAdmin _sender;
+  admin_params := new_admin_params;
+  e = {_eventname : "ChangeAdminParams"; adminParams : new_admin_params};
+  event e
+end
+
+procedure CheckVaultFactory(vault_factory: ByStr20)
+  temp <- admin_params;
+  some_bool <-& temp.active_vault_factories[vault_factory];
+  is_active = get_bool some_bool;
+  match is_active with
+  | True =>
+  | False => 
+    err = CallableOnlyByVaultFactory;
+    ThrowError err
+  end
+end
+
+transition UpdateParams(
+  vaultId: Uint32,
+  collateralAmount: Uint128,
+  pillarBorrowed: Uint128,
+  interestAccumulated: Uint128,
+  lastUpdatedAt: BNum,
+  totalPillarMinted: Uint128,
+  totalPillarRepaid: Uint128,
+  totalCollateral: Uint128
+)
+  CheckVaultFactory _sender;
+  collateral_amount[vaultId] := collateralAmount;
+  pillar_borrowed[vaultId] := pillarBorrowed;
+  interest_accumulated[vaultId] := interestAccumulated;
+  last_updated_at[vaultId] := lastUpdatedAt;
+  total_pillar_minted:= totalPillarMinted;
+  total_pillar_repaid:= totalPillarRepaid;
+  total_collateral := totalCollateral
+end
+
+procedure Stat(vaultId: Uint32)
+  someCollateralAmount <- collateral_amount[vaultId];
+  collateralAmount = decode_value someCollateralAmount;
+
+  somePillarBorrowed <- pillar_borrowed[vaultId];
+  pillarBorrowed = decode_value somePillarBorrowed;
+  
+  someInterestAccumulated <- interest_accumulated[vaultId];
+  interestAccumulated = decode_value someInterestAccumulated;
+
+  someLastUpdatedAt <- last_updated_at[vaultId];
+  lastUpdatedAt = decode_bnum someLastUpdatedAt;
+
+  totalPillarMinted <- total_pillar_minted;
+
+  totalPillarRepaid <- total_pillar_repaid;
+  totalCollateral <- total_collateral;
+  
+  e = {_eventname : "Stat"; vaultId: vaultId; collateralAmount: collateralAmount; pillarBorrowed: pillarBorrowed;
+       interestAccumulated: interestAccumulated; lastUpdatedAt: lastUpdatedAt; totalPillarMinted: totalPillarMinted;
+       totalPillarRepaid: totalPillarRepaid; totalCollateral: totalCollateral
+  };
+    event e
+end
+
+transition OperationGetNewVault(
+  vaultId: Uint32,
+  initiator: ByStr20
+)
+  CheckVaultFactory _sender;
+  vaults[vaultId] := initiator;
+  total_vaults:= vaultId;
+  
+  currentBlock <-& BLOCKNUMBER;
+  last_updated_at[vaultId] := currentBlock;
+  
+  Stat vaultId
+end
+
+transition OperationAddCollateral(vaultId: Uint32, collateralAdded: Uint128, marginalInterest: Uint128)
+  CheckVaultFactory _sender;
+  some_collateral <- collateral_amount[vaultId];
+  currentCollateral = decode_value some_collateral;
+
+  some_interest <- interest_accumulated[vaultId];
+  currentInterest = decode_value some_interest;
+
+  newCollateral = builtin add currentCollateral collateralAdded;
+  newInterest  = builtin add currentInterest marginalInterest;
+
+  currentBlock <-& BLOCKNUMBER;
+  
+  collateral_amount[vaultId] := newCollateral;
+  interest_accumulated[vaultId] := newInterest;
+  last_updated_at[vaultId] := currentBlock;
+  
+  oldTotalCollateral <- total_collateral;
+  newTotalCollateral = builtin add oldTotalCollateral collateralAdded;
+  total_collateral := newTotalCollateral;
+  
+  Stat vaultId
+end
+
+transition OperationReleaseCollateral(vaultId: Uint32, collateralReleased: Uint128, marginalInterest: Uint128)
+  CheckVaultFactory _sender;
+  some_collateral <- collateral_amount[vaultId];
+  currentCollateral = decode_value some_collateral;
+
+  some_interest <- interest_accumulated[vaultId];
+  currentInterest = decode_value some_interest;
+
+  newCollateral = builtin sub currentCollateral collateralReleased;
+  newInterest  = builtin add currentInterest marginalInterest;
+
+  currentBlock <-& BLOCKNUMBER;
+
+  collateral_amount[vaultId] := newCollateral;
+  interest_accumulated[vaultId] := newInterest;
+  last_updated_at[vaultId] := currentBlock;
+  
+  oldTotalCollateral <- total_collateral;
+  newTotalCollateral = builtin sub oldTotalCollateral collateralReleased;
+  total_collateral := newTotalCollateral;
+
+  Stat vaultId
+end
+
+procedure UpdateTotalMinted(amount: Uint128)
+  currentTotalMinted <- total_pillar_minted;
+  newTotalMinted = builtin add currentTotalMinted amount;
+  total_pillar_minted := newTotalMinted
+end
+
+transition OperationMintPillar(vaultId: Uint32, pillarMinted: Uint128, marginalInterest: Uint128)
+  CheckVaultFactory _sender;
+  some_pillar <- pillar_borrowed[vaultId];
+  currentPillar = decode_value some_pillar;
+
+  some_interest <- interest_accumulated[vaultId];
+  currentInterest = decode_value some_interest;
+
+  newPillarBorrowed = builtin add currentPillar pillarMinted;
+  newInterest  = builtin add currentInterest marginalInterest;
+
+  currentBlock <-& BLOCKNUMBER;
+
+  pillar_borrowed[vaultId] := newPillarBorrowed;
+  interest_accumulated[vaultId] := newInterest;
+  last_updated_at[vaultId] := currentBlock;
+
+  UpdateTotalMinted pillarMinted;
+  
+  Stat vaultId
+end
+
+procedure UpdateTotalRepaid(amount: Uint128)
+  currentTotalRepaid <- total_pillar_repaid;
+  newTotalRepaid = builtin add currentTotalRepaid amount;
+  total_pillar_repaid := newTotalRepaid
+end
+
+transition OperationLiquidateVault(vaultId: Uint32, newOwner: ByStr20, amount: Uint128, penalty: Uint128)
+  CheckVaultFactory _sender;
+  currentBlock <-& BLOCKNUMBER;
+
+  pillar_borrowed[vaultId] := zero_uint128;
+  interest_accumulated[vaultId] := zero_uint128;
+  last_updated_at[vaultId] := currentBlock;
+
+  some_collateral <- collateral_amount[vaultId];
+  currentCollateral = decode_value some_collateral;
+  newCollateral = builtin sub currentCollateral penalty;
+  collateral_amount[vaultId] := newCollateral;
+
+  oldTotalCollateral <- total_collateral;
+  newTotalCollateral = builtin sub oldTotalCollateral penalty;
+  total_collateral := newTotalCollateral;
+
+  vaults[vaultId] := newOwner;
+  UpdateTotalRepaid amount;
+
+  Stat vaultId
+end
+
+transition OperationRepayTotalDebt(vaultId: Uint32, amount: Uint128)
+  CheckVaultFactory _sender;
+  currentBlock <-& BLOCKNUMBER;
+
+  pillar_borrowed[vaultId] := zero_uint128;
+  interest_accumulated[vaultId] := zero_uint128;
+  last_updated_at[vaultId] := currentBlock;
+
+  UpdateTotalRepaid amount;
+  
+  Stat vaultId
+end
+
+transition OperationRepayTotalInterestWithSomePillarBorrowed(vaultId: Uint32, principleReduced: Uint128, interestRepaid: Uint128)
+  CheckVaultFactory _sender;
+  currentBlock <-& BLOCKNUMBER;
+  some_pillar <- pillar_borrowed[vaultId];
+  currentPillar = decode_value some_pillar;
+
+  newPillar = builtin sub currentPillar principleReduced;
+  pillar_borrowed[vaultId] := newPillar;
+  interest_accumulated[vaultId] := zero_uint128;
+  last_updated_at[vaultId] := currentBlock;
+  
+  amount = builtin add principleReduced interestRepaid;
+  UpdateTotalRepaid amount;
+
+  Stat vaultId
+end
+
+transition OperationRepayOnlyInterest(vaultId: Uint32, amount: Uint128)
+  CheckVaultFactory _sender;
+  currentBlock <-& BLOCKNUMBER;
+  some_interest <- interest_accumulated[vaultId];
+  currentInterest = decode_value some_interest;
+
+  newInterest = builtin sub currentInterest amount;
+  interest_accumulated[vaultId] := newInterest;
+  last_updated_at[vaultId] := currentBlock;
+
+  UpdateTotalRepaid amount;
+
+  Stat vaultId
+end
+
+transition OperationRepayAndAddRemainingInterest(vaultId: Uint32, refactoredInterest: Uint128, amountPaid: Uint128)
+  CheckVaultFactory _sender;
+  currentBlock <-& BLOCKNUMBER;
+  some_interest <- interest_accumulated[vaultId];
+  currentInterest = decode_value some_interest;
+
+  newInterest = builtin add currentInterest refactoredInterest;
+  interest_accumulated[vaultId] := newInterest;
+  last_updated_at[vaultId] := currentBlock;
+
+  UpdateTotalRepaid amountPaid;
+
+  Stat vaultId
+end

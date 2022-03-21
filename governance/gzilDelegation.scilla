@@ -1,0 +1,201 @@
+scilla_version 0
+
+import IntUtils BoolUtils
+
+library Delegation
+    let zero_uint128 = Uint128 0
+    let zero_address = 0x0000000000000000000000000000000000000000
+    let zero_bnum = BNum 0
+
+    let one_uint128 = Uint128 1
+
+    let false = False
+
+    let decode_uint128 = 
+        fun (some_value: Option Uint128) =>
+            match some_value with 
+                | Some value => value
+                | None => zero_uint128
+            end
+
+    let decode_address = 
+        fun (some_address: Option ByStr20) => 
+            match some_address with 
+                | Some address => address
+                | None => zero_address
+            end
+
+    type Error =
+    | CallerNotAdmin
+    | NotStakingContract
+    | CodeIsSender
+    | CannotBeZero
+    | NoDelegation
+
+    let make_error =
+        fun (result : Error) =>
+            let result_code = 
+                match result with
+                | CallerNotAdmin                 => Int32 -901
+                | NotStakingContract             => Int32 -902
+                | CodeIsSender                   => Int32 -903
+                | CannotBeZero                   => Int32 -904
+                | NoDelegation                   => Int32 -905
+                end
+            in
+            { _exception : "Error"; code : result_code }
+
+contract GzilDelegation
+(
+    init_admin: ByStr20,
+    gzil_staking_contract: ByStr20 with contract field totalGzilLocked: Uint128,
+                                                 field totalShares: Uint128,
+                                                 field userShares: Map ByStr20 Uint128,
+                                                 field userSharesPendingToBeWithdrawn: Map ByStr20 Uint128,
+                                                 field delegationContract: ByStr20
+                            end
+)
+
+field delegation: Map ByStr20 ByStr20 = Emp ByStr20 ByStr20
+field balances : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+field existingUserDelegatedAmount: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+field admin: ByStr20 = init_admin
+field pending_admin : Option ByStr20 = None {ByStr20}
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure OnlyStakingContract()
+    is_sender = builtin eq _sender gzil_staking_contract;
+    
+    match is_sender with
+    | True =>
+    | False =>
+        err = NotStakingContract;
+        ThrowError err
+    end  
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure IsNotZero(value: Uint128)
+  is_zero = builtin eq value zero_uint128;
+  match is_zero with
+    | False =>
+    | True =>
+      err = CannotBeZero;
+      ThrowError err
+  end
+end
+
+procedure IsAdmin(address: ByStr20)
+  adm <- admin;
+  is_adm = builtin eq address adm;
+  match is_adm with
+    | True =>
+    | False => 
+      err = CallerNotAdmin;
+      ThrowError err
+  end
+end
+
+procedure UpdateDelegation(delegator: ByStr20, oldDelegatee: ByStr20, newDelegatee: ByStr20)
+    some_existingVotesOfOldDelegatee <- balances[oldDelegatee];
+    existingVotesOfOldDelegatee = decode_uint128 some_existingVotesOfOldDelegatee;
+
+    some_existingShareOfDelegator <- existingUserDelegatedAmount[delegator];
+    existingShareOfDelegator = decode_uint128 some_existingShareOfDelegator;
+
+    oldDelegateeVotes = builtin sub existingVotesOfOldDelegatee existingShareOfDelegator;
+    balances[oldDelegatee] := oldDelegateeVotes;
+
+    some_temp1 <-& gzil_staking_contract.userShares[delegator];
+    temp1 = decode_uint128 some_temp1;
+
+    some_temp2 <-& gzil_staking_contract.userSharesPendingToBeWithdrawn[delegator];
+    temp2 = decode_uint128 some_temp2;
+    newExistingShareOfDelegator = builtin sub temp1 temp2;
+    existingUserDelegatedAmount[delegator] := newExistingShareOfDelegator;
+
+    some_existingVotesOfNewDelegatee <- balances[newDelegatee];
+    existingVotesOfNewDelegatee = decode_uint128 some_existingVotesOfNewDelegatee;
+
+    newDelegateeVotes = builtin add existingVotesOfNewDelegatee newExistingShareOfDelegator;
+    balances[newDelegatee] := newDelegateeVotes;
+
+    e = {_eventname: "UpdateVotes"; delegatorShares: newExistingShareOfDelegator; oldDelegateeVotes:  oldDelegateeVotes; newDelegateeVotes: newDelegateeVotes;
+            delegator: delegator; oldDelegatee: oldDelegatee; newDelegatee: newDelegatee
+        };
+    event e
+end
+
+transition NotifyDelegation(address: ByStr20)
+    OnlyStakingContract;
+    some_delegatee <- delegation[address];
+    delegatee = decode_address some_delegatee;
+    has_no_delegatee = builtin eq delegatee zero_address;
+    
+    match has_no_delegatee with
+        | True =>
+            delegation[address] := address;
+            UpdateDelegation address address address;
+            e = {_eventname: "UpdateDelegation"; delegator: address; delegatee: address };
+            event e
+        | False =>
+            UpdateDelegation address delegatee delegatee;
+            e = {_eventname: "UpdateDelegation"; delegator: address; delegatee: delegatee };
+            event e
+    end
+end
+
+transition RequestAdminTransfer (new_admin : ByStr20)
+  IsAdmin _sender;
+  IsNotSender new_admin;
+  pa = Some {ByStr20} new_admin;
+  pending_admin := pa
+end
+
+transition ConfirmAdminTransfer ()
+  optional_pa <- pending_admin;
+  match optional_pa with
+  | Some pend_admin =>
+      caller_is_new_admin = builtin eq _sender pend_admin;
+      match caller_is_new_admin with
+      | True =>
+          admin := pend_admin;
+          none = None {ByStr20};
+          pending_admin := none;
+          e = {_eventname : "TransferOwnership"; newAdmin : pend_admin};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+transition UpdateDelegatee(newDelegatee: ByStr20)
+    some_oldDelegatee <- delegation[_sender];
+    oldDelegatee = decode_address some_oldDelegatee;
+    has_no_delegatee = builtin eq oldDelegatee zero_address;
+    
+    match has_no_delegatee with
+        | True =>
+            err = NoDelegation;
+            ThrowError err
+        | False =>
+            UpdateDelegation _sender oldDelegatee newDelegatee;
+            delegation[_sender] := newDelegatee
+    end
+end

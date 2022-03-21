@@ -1,0 +1,227 @@
+scilla_version 0
+
+import IntUtils BoolUtils ListUtils
+
+library Reward
+    let zero_uint128 = Uint128 0
+    let zero_address = 0x0000000000000000000000000000000000000000
+    let zero_bnum = BNum 0
+
+    let one_uint128 = Uint128 1
+
+    let false = False
+
+    let decode_uint128 = 
+        fun (some_value: Option Uint128) =>
+            match some_value with 
+                | Some value => value
+                | None => zero_uint128
+            end
+
+    let decode_address = 
+        fun (some_address: Option ByStr20) => 
+            match some_address with 
+                | Some address => address
+                | None => zero_address
+            end
+
+    type Error =
+    | CallerNotAdmin
+    | CodeIsSender
+    | CannotBeZero
+
+    type Reward = | Reward of Uint32 ByStr20 Uint128
+    
+    let make_error =
+        fun (result : Error) =>
+            let result_code = 
+                match result with
+                | CallerNotAdmin                 => Int32 -901
+                | CodeIsSender                   => Int32 -902
+                | CannotBeZero                   => Int32 -903
+                end
+            in
+            { _exception : "Error"; code : result_code }
+    
+    let pairpair_to_reward = 
+      fun (pp : Pair Uint32 (Pair ByStr20 Uint128)) =>
+        match pp with 
+        | Pair a (Pair b c) =>
+          Reward a b c
+        end
+
+let mapper = @list_map (Pair Uint32 (Pair ByStr20 Uint128) ) (Reward)
+
+let one_msg = 
+    fun (msg : Message) => 
+        let nil_msg = Nil {Message} in
+        Cons {Message} msg nil_msg
+
+contract RewardContract
+(
+    init_admin: ByStr20
+)
+
+field admin: ByStr20 = init_admin
+field pending_admin : Option ByStr20 = None {ByStr20}
+field rewardPerEpoch: Map Uint32 (Map ByStr20 Uint128) = Emp Uint32 (Map ByStr20 Uint128)
+field rewardClaimedPerEpoch: Map Uint32 (Map ByStr20 Uint128) = Emp Uint32 (Map ByStr20 Uint128)
+field collateralForEpoch: Map Uint32 ByStr20 = Emp Uint32 ByStr20
+
+field gzilStakingContract: ByStr20 = zero_address
+field balances : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure IsAdmin(address: ByStr20)
+  adm <- admin;
+  is_adm = builtin eq address adm;
+  match is_adm with
+    | True =>
+    | False => 
+      err = CallerNotAdmin;
+      ThrowError err
+  end
+end
+
+procedure IsNotZero(value: Uint128)
+  is_zero = builtin eq value zero_uint128;
+  match is_zero with
+    | False =>
+    | True =>
+      err = CannotBeZero;
+      ThrowError err
+  end
+end
+
+procedure IsNotZeroAddress(address: ByStr20)
+  is_zero = builtin eq address zero_address;
+  match is_zero with
+    | False =>
+    | True =>
+      err = CannotBeZero;
+      ThrowError err
+  end
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+transition RequestAdminTransfer (new_admin : ByStr20)
+  IsAdmin _sender;
+  IsNotSender new_admin;
+  pa = Some {ByStr20} new_admin;
+  pending_admin := pa
+end
+
+transition ConfirmAdminTransfer ()
+  optional_pa <- pending_admin;
+  match optional_pa with
+  | Some pend_admin =>
+      caller_is_new_admin = builtin eq _sender pend_admin;
+      match caller_is_new_admin with
+      | True =>
+          admin := pend_admin;
+          none = None {ByStr20};
+          pending_admin := none;
+          e = {_eventname : "TransferOwnership"; newAdmin : pend_admin};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+procedure noteReward(reward: Reward)
+  match reward with
+    | Reward epoch address amount =>
+      rewardPerEpoch[epoch][address] := amount;
+      e = {_eventname: "RecordReward"; epoch: epoch; address: address; amount: amount};
+      event e
+  end
+end
+
+transition registerReward(list: List (Pair (Uint32) (Pair ByStr20 Uint128)))
+  list_new = mapper pairpair_to_reward list;
+  IsAdmin _sender;
+  forall list_new noteReward
+end
+
+transition EditReward(reward : Pair Uint32 (Pair ByStr20 Uint128))
+   reward_temp = pairpair_to_reward reward;
+   IsAdmin _sender;
+  noteReward reward_temp
+end
+
+procedure SafeTransfer(tokenContract: ByStr20, to: ByStr20, amount: Uint128)
+    msg_to_token_contract = {_tag: "Transfer"; _recipient: tokenContract; _amount: zero_uint128;
+                                    to: to; amount: amount
+                            };
+    msgs = one_msg msg_to_token_contract;
+    send msgs
+end
+
+transition setRewardTokenForEpoch(epoch: Uint32, collateral: ByStr20)
+  collateralForEpoch[epoch] := collateral;
+  e = {_eventname: "RewardTokenForEpoch"; epoch: epoch; collateralToken: collateral};
+  event e
+end
+
+transition setGzilStakingContract(stakingContract: ByStr20)
+  gzilStakingContract := stakingContract
+end
+
+transition claimReward(epoch: Uint32)
+  some_collateral <- collateralForEpoch[epoch];
+  collateralToken = decode_address some_collateral;
+  IsNotZeroAddress collateralToken;
+
+  spender <- gzilStakingContract;
+  IsNotZeroAddress spender;
+
+  some_rewardAvailable <- rewardPerEpoch[epoch][_sender];
+  rewardAvailable = decode_uint128 some_rewardAvailable;
+
+  some_rewardClaimed <- rewardClaimedPerEpoch[epoch][_sender];
+  rewardClaimed = decode_uint128 some_rewardClaimed;
+  
+  rewardToWithdraw = builtin sub rewardAvailable rewardClaimed;
+  IsNotZero rewardToWithdraw;
+  
+  totalRewardClaimed = builtin add rewardClaimed rewardToWithdraw;
+  rewardPerEpoch[epoch][_sender] := totalRewardClaimed;
+  
+  SafeTransfer collateralToken _sender  rewardToWithdraw;
+  e = {_eventname: "ClaimReward"; epoch: epoch; address: _sender; amount: totalRewardClaimed};
+  event e
+end
+
+transition RecipientAcceptTransferFrom(initiator: ByStr20, sender: ByStr20, recipient: ByStr20, amount: Uint128)
+(*  to be complete*)
+end
+
+transition TransferFromSuccessCallBack(initiator: ByStr20, sender: ByStr20, recipient: ByStr20, amount: Uint128)
+(*  to be complete*)
+end
+
+transition RecipientAcceptTransfer(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+  some_existingBalance <- balances[_sender];
+  existingBalance = decode_uint128 some_existingBalance;
+
+  newBalance = builtin add existingBalance amount;
+  balances[_sender] := newBalance
+end
+
+transition TransferSuccessCallBack(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+  (*  to be complete*)
+end

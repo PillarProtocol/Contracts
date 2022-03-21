@@ -1,0 +1,22 @@
+scilla_version 0
+
+contract InsuranceWallet
+(init_owner: ByStr20)
+
+field owner: ByStr20 = init_owner
+
+transition RecipientAcceptTransferFrom(initiator: ByStr20, sender: ByStr20, recipient: ByStr20, amount: Uint128)
+(*  to be complete*)
+end
+
+transition TransferFromSuccessCallBack(initiator: ByStr20, sender: ByStr20, recipient: ByStr20, amount: Uint128)
+(*  to be complete*)
+end
+
+transition RecipientAcceptTransfer(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+  (*  to be complete*)
+end
+
+transition TransferSuccessCallBack(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+  (*  to be complete*)
+end

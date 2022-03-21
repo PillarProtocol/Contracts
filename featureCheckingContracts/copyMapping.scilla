@@ -1,0 +1,37 @@
+scilla_version 0
+
+library Mapping
+    type MyPair = | MyPair of ByStr20 Uint128
+
+contract CopyMapping
+()
+
+field innerMap: Map Uint256 Uint256 = Emp Uint256 Uint256
+field outerMap: Map Uint32 (Map Uint256 Uint256) = Emp Uint32 (Map Uint256 Uint256)
+
+field innerAddressMap: Map ByStr20 ByStr20 = Emp ByStr20 ByStr20
+field outerAddressMap: Map Uint32 (Map ByStr20 ByStr20) = Emp Uint32 (Map ByStr20 ByStr20)
+
+field someList: List MyPair = Nil {MyPair}
+
+transition PopulateInnerMap(key: Uint256, value: Uint256)
+    innerMap[key] := value
+end
+
+transition takeSnapshot(snapshotNumber: Uint32)
+    tempMap <- innerMap;
+    outerMap[snapshotNumber] := tempMap
+end
+
+transition PopulateInnerAddressMap(key: ByStr20, value: ByStr20)
+    innerAddressMap[key] := value
+end
+
+transition takeSnapshotAddress(snapshotNumber: Uint32)
+    tempMap <- innerAddressMap;
+    outerAddressMap[snapshotNumber] := tempMap
+end
+
+transition dumpPair(list: List MyPair)
+    someList := list
+end

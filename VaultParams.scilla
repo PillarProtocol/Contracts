@@ -1,0 +1,223 @@
+scilla_version 0
+
+import IntUtils BoolUtils
+
+library VaultParamsAssets
+    let true = True
+    let false = False
+
+    let zero_uint128 = Uint128 0
+
+    let get_bool = 
+      fun (some_bool: Option Bool) =>
+          match some_bool with
+          | Some bool => bool
+          | None => false
+          end
+
+    type Error =
+        | CallerNotGovernance
+        | CodeIsSender
+        | ProposalAlreadyExecuted
+        | BelowVaultPrice
+
+    let make_error =
+        fun (result : Error) =>
+        let result_code = 
+            match result with
+            | CallerNotGovernance            => Int32 -401
+            | CodeIsSender                   => Int32 -402
+            | ProposalAlreadyExecuted        => Int32 -403
+            | BelowVaultPrice                => Int32 -404
+            end
+        in
+        { _exception : "Error"; code : result_code }
+
+
+contract VaultParams
+(
+    init_governance: ByStr20,
+    init_minimum_collateral_ratio: Uint128,
+    init_liquidation_penalty: Uint128,
+    init_vault_price: Uint128,
+    init_dev_share: Uint128,
+    init_burn_address: ByStr20,
+    init_insurance_address: ByStr20,
+    init_dev_address: ByStr20,
+    init_pillar_token: ByStr20
+)
+
+field governance: ByStr20 = init_governance
+field pending_governance : Option ByStr20 = None {ByStr20}
+field governanceProposalsExecuted: Map Uint32 Bool = Emp Uint32 Bool
+
+field vault_price: Uint128 = init_vault_price
+
+(* 100 means 1% *)
+field interest_rate_per_10000_token: Uint128 = Uint128 100
+field interest_last_updated_at: BNum = BNum 0
+field blocks_per_year: Uint128 = Uint128 100
+
+(* 50000 means 500% or 5 times *)
+field minimum_collateralization_ratio: Uint128 = init_minimum_collateral_ratio 
+
+field burn_address: ByStr20 = init_burn_address 
+field insurance_address: ByStr20 = init_insurance_address
+field dev_address: ByStr20 = init_dev_address
+field liquidation_penalty: Uint128 = init_liquidation_penalty
+field dev_share: Uint128 = init_dev_share
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure IsGovernance(address: ByStr20)
+  gov <- governance;
+  is_gov = builtin eq address gov;
+  match is_gov with
+    | True =>
+    | False => 
+      err = CallerNotGovernance;
+      ThrowError err
+  end
+end
+
+procedure IsProposalExecuted(proposalId: Uint32)
+    some_is_executed <- governanceProposalsExecuted[proposalId];
+    is_executed = get_bool some_is_executed;
+    match is_executed with
+        | True => 
+            err = ProposalAlreadyExecuted;
+            ThrowError err
+        | False =>
+    end
+end
+
+procedure UpdateGovernanceProposalStatus(proposalId: Uint32)
+  governanceProposalsExecuted[proposalId] := true;
+  e = {_eventname : "ProposalExecuted"; proposalId : proposalId};
+  event e  
+end
+
+transition RequestGovernanceTransfer (new_governance : ByStr20, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  IsNotSender new_governance;
+  pg = Some {ByStr20} new_governance;
+  pending_governance := pg;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ConfirmGovernanceTransfer ()
+  optional_pg <- pending_governance;
+  match optional_pg with
+  | Some pend_gov =>
+      caller_is_new_governance = builtin eq _sender pend_gov;
+      match caller_is_new_governance with
+      | True =>
+          governance := pend_gov;
+          none = None {ByStr20};
+          pending_governance := none;
+          e = {_eventname : "TransferOwnership"; newGovernance : pend_gov};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+transition ChangeInterestRate(new_interest_rate: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  interest_rate_per_10000_token := new_interest_rate;
+
+  blk <- & BLOCKNUMBER;
+  interest_last_updated_at := blk;
+
+  e = {_eventname : "ChangeInterestRate"; newInterestRate : new_interest_rate; interestLastUpdatedAt: blk};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeMinimumCollateralizatioRatio(new_minimum_collateralization_ratio: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  minimum_collateralization_ratio := new_minimum_collateralization_ratio;
+  e = {_eventname : "ChangeMinimumCollateralizationRatio"; newMinimumCollateralizationRatio : new_minimum_collateralization_ratio};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeLiquidationPenalty(new_liquidation_penalty: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  liquidation_penalty := new_liquidation_penalty;
+  e = {_eventname : "ChangeLiquidationPenalty"; newLiquidationPenalty : new_liquidation_penalty};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeDevShare(new_dev_share: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  dev_share := new_dev_share;
+  e = {_eventname : "ChangeDevShare"; newDevShare : new_dev_share};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeBurnAddress(new_burn_address: ByStr20, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  burn_address := new_burn_address;
+  e = {_eventname : "ChangeBurnAddress"; burnAddress : new_burn_address};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeInsuranceAddress(new_insurance_address: ByStr20, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  insurance_address := new_insurance_address;
+  e = {_eventname : "ChangeInsuranceAddress"; insuranceAddress : new_insurance_address};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeDevAddress(new_dev_address: ByStr20, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  dev_address := new_dev_address;
+  e = {_eventname : "ChangeDevAddress"; devAddress : new_dev_address};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeVaultPrice(new_vault_price: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  vault_price := new_vault_price;
+  e = {_eventname : "ChangeVaultPrice"; newVaultPrice : new_vault_price};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end
+
+transition ChangeBlocksPerYear(new_blocks_per_year: Uint128, proposalId: Uint32)
+  IsGovernance _sender;
+  IsProposalExecuted proposalId;
+  blocks_per_year := new_blocks_per_year;
+  e = {_eventname : "ChangeBlocksPerYear"; blocksPerYear : new_blocks_per_year};
+  event e;
+  UpdateGovernanceProposalStatus proposalId
+end

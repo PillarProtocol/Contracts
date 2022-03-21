@@ -1,0 +1,99 @@
+scilla_version 0
+
+import IntUtils BoolUtils
+
+library VaultParamsAssets
+    let true = True
+        let false = False
+
+    let zero_uint128 = Uint128 0
+
+    type Error =
+        | CallerNotAdmin
+        | CodeIsSender
+    
+    let make_error =
+        fun (result : Error) =>
+            let result_code = 
+                match result with
+                | CallerNotAdmin                 => Int32 -501
+                | CodeIsSender                   => Int32 -502
+                end
+            in
+            { _exception : "Error"; code : result_code }
+
+contract AdminParams
+(
+    init_admin: ByStr20
+)
+
+field admin: ByStr20 = init_admin
+field pending_admin : Option ByStr20 = None {ByStr20}
+
+field active_vault_factories: Map ByStr20 Bool = Emp ByStr20 Bool
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw 
+end
+
+procedure IsNotSender(address: ByStr20)
+  is_sender = builtin eq _sender address;
+  match is_sender with
+  | True =>
+    err = CodeIsSender;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure IsAdmin(address: ByStr20)
+  adm <- admin;
+  is_adm = builtin eq address adm;
+  match is_adm with
+    | True =>
+    | False => 
+      err = CallerNotAdmin;
+      ThrowError err
+  end
+end
+
+transition RequestAdminTransfer (new_admin : ByStr20)
+  IsAdmin _sender;
+  IsNotSender new_admin;
+  pa = Some {ByStr20} new_admin;
+  pending_admin := pa
+end
+
+transition ConfirmAdminTransfer ()
+  optional_pa <- pending_admin;
+  match optional_pa with
+  | Some pend_admin =>
+      caller_is_new_admin = builtin eq _sender pend_admin;
+      match caller_is_new_admin with
+      | True =>
+          admin := pend_admin;
+          none = None {ByStr20};
+          pending_admin := none;
+          e = {_eventname : "TransferOwnership"; newAdmin : pend_admin};
+          event e
+      | False =>
+      end
+  | None =>
+  end
+end
+
+transition AddVaultFactory(new_vault_factory: ByStr20)
+  IsAdmin _sender;
+  active_vault_factories[new_vault_factory] := true;
+  e = {_eventname : "AddVaultFactory"; vaultFactory : new_vault_factory};
+  event e
+end
+
+transition RemoveVaultFactory(vault_factory: ByStr20)
+  (* active_vault_factories[vault_factory] := false; *)
+  IsAdmin _sender;
+  delete active_vault_factories[vault_factory];
+  e = {_eventname : "RemoveVaultFactory"; vaultFactory : vault_factory};
+  event e
+end
